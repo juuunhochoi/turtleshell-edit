@@ -87,7 +87,7 @@
     animationFrameId = null;
     const elapsedMs = previousFrameTime ? Math.min(50, now - previousFrameTime) : 16;
     previousFrameTime = now;
-    const responseMs = target > current ? 180 : 140;
+    const responseMs = target > current ? 100 : 80;
     const smoothing = 1 - Math.exp(-elapsedMs / responseMs);
     current += (target - current) * smoothing;
 

@@ -23,6 +23,14 @@ async function togglePreviewMode() {
   if (result) setPreviewMode(result.silhouetteOnly);
 }
 previewModeToggle.addEventListener("change", togglePreviewMode);
+const previewFrame = cameraPreview.parentElement;
+
+// guide: null = hidden (calibrated / off), true/false = whether the user sits centred for setup.
+function setGuide(guide) {
+  previewFrame.classList.toggle("guide", guide === true || guide === false);
+  previewFrame.classList.toggle("aligned", guide === true);
+  $("guideLabel").textContent = guide ? "좋아요! 기준 자세 버튼을 누르세요" : "얼굴과 어깨가 화면 가운데 오게 앉아 주세요";
+}
 
 const VIRTUAL_CAMERA_LABEL = /\b(?:obs|virtual|virtualcam|droidcam|iriun|manycam|xsplit|snap camera|mmhmm|camo)\b/i;
 const BUILT_IN_CAMERA_LABEL = /built[ -]?in|integrated|internal|webcam|facetime|front camera|내장|웹캠/i;
@@ -102,15 +110,18 @@ chrome.runtime.onMessage.addListener(message => {
       scoreBar.style.width = "0%";
       scoreTrack.setAttribute("aria-valuenow", "0");
       cameraPreview.style.display = "none";
+      setGuide(null);
     }
   }
   if (message?.type === "POSTUREFLOW_UI_PREVIEW") {
     if (message.data) {
       cameraPreview.src = message.data;
       cameraPreview.style.display = "block";
+      setGuide(message.guide);
     } else {
       cameraPreview.removeAttribute("src");
       cameraPreview.style.display = "none";
+      setGuide(null);
     }
   }
   if (message?.type === "POSTUREFLOW_UI_SCORE") {
@@ -122,6 +133,7 @@ chrome.runtime.onMessage.addListener(message => {
   if (message?.type === "POSTUREFLOW_UI_CALIBRATED") {
     calibrateBtn.classList.remove("primary");
     calibrateBtn.classList.add("secondary");
+    setGuide(null);
     statusDetail.textContent = "이제 자세를 감지합니다.";
   }
   if (message?.type === "CAMERA_GRANTED") fillCameras().catch(() => {});

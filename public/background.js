@@ -36,7 +36,24 @@ async function activeTab() {
 }
 
 async function sendToTab(tabId, message) {
-  try { await chrome.tabs.sendMessage(tabId, message); } catch { /* Restricted pages may not accept content scripts. */ }
+  try { await chrome.tabs.sendMessage(tabId, message); return true; } catch { return false; /* Restricted pages may not accept content scripts. */ }
+}
+
+// The score reaches the side panel but the tab can't show the blur when it has no live content script:
+// chrome:// pages, the Web Store, or tabs left open while the extension was reloaded/updated.
+// Tell the user once per tab instead of failing silently.
+const unreachableHinted = new Set();
+async function hintUnreachableTab(tabId) {
+  if (unreachableHinted.has(tabId)) return;
+  unreachableHinted.add(tabId);
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const restricted = !/^https?:/.test(tab?.url || "");
+  chrome.runtime.sendMessage({
+    type: "POSTUREFLOW_UI_HINT",
+    hint: restricted
+      ? "이 페이지에서는 화면 효과를 쓸 수 없어요. 일반 웹사이트 탭에서 확인해 주세요."
+      : "이 탭은 새로고침(F5)해야 화면 효과가 나타나요. 확장 프로그램을 다시 불러오기 전에 열어 둔 탭이에요."
+  }).catch(() => {});
 }
 
 async function broadcast(message) {
@@ -228,13 +245,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       if (!state.active || !state.effects) return;
       if (!activeTabResolved) await activeTab();
-      if (activeTabId != null) sendToTab(activeTabId, { type: "POSTUREFLOW_SCORE", score: message.score, active: true });
+      if (activeTabId != null) {
+        const tabId = activeTabId;
+        sendToTab(tabId, { type: "POSTUREFLOW_SCORE", score: message.score, active: true })
+          .then(ok => { if (!ok && message.score > 0) hintUnreachableTab(tabId); });
+      }
     });
     chrome.runtime.sendMessage({ ...message, type: "POSTUREFLOW_UI_SCORE" }).catch(() => {});
     return false;
   }
   if (message?.type === "POSTUREFLOW_OFFSCREEN_PREVIEW") {
-    chrome.runtime.sendMessage({ type: "POSTUREFLOW_UI_PREVIEW", data: message.data }).catch(() => {});
+    chrome.runtime.sendMessage({ type: "POSTUREFLOW_UI_PREVIEW", data: message.data, guide: message.guide }).catch(() => {});
     return false;
   }
   if (message?.type === "PAGE_CAMERA_STATE" && message.active) {
@@ -296,6 +317,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   handleTabChange(tabId);
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete") unreachableHinted.delete(tabId); // reloaded: content script is live again
   if (tab.active && (changeInfo.url || changeInfo.status === "complete")) {
     activeTabId = tabId;
     activeTabResolved = true;

@@ -23,9 +23,6 @@ const previewCanvas = document.createElement("canvas");
 previewCanvas.width = 320;
 previewCanvas.height = 240;
 const previewContext = previewCanvas.getContext("2d");
-const silhouetteCanvas = document.createElement("canvas");
-const silhouetteContext = silhouetteCanvas.getContext("2d");
-let silhouetteImageData = null;
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const BLUR_START_SCORE = 0.8;
@@ -35,9 +32,17 @@ function extractFeatures(landmarks, worldLandmarks) {
   const nose = landmarks[0];
   const leftEar = landmarks[7], rightEar = landmarks[8];
   const leftShoulder = landmarks[11], rightShoulder = landmarks[12];
-  if (![nose, leftEar, rightEar, leftShoulder, rightShoulder].every(point => point && point.visibility > 0.35)) {
+  const isVisible = point => point && point.visibility > 0.35;
+  const faceVisible = [nose, leftEar, rightEar].filter(isVisible).length;
+  if (!faceVisible && !isVisible(leftShoulder) && !isVisible(rightShoulder)) {
     return { valid: false, missing: true, reason: "얼굴 또는 어깨 랜드마크가 보이지 않음" };
   }
+  // Face partly hidden (hand, headphones): hold the current score briefly instead of resetting it.
+  if (faceVisible < 3) return { valid: false, graceMs: 1500, reason: "얼굴 일부가 가려져 측정 보류" };
+  // A hidden shoulder is often the slouch itself (sinking below the frame), so keep scoring
+  // with the model's estimated shoulder position rather than pausing.
+  // ponytail: estimate quality off-frame is unverified; add an explicit penalty if it under-reports.
+  if (!leftShoulder || !rightShoulder) return { valid: false, missing: true, reason: "어깨 랜드마크 없음" };
 
   const earMidX = (leftEar.x + rightEar.x) / 2;
   const earWidth = Math.max(0.02, Math.abs(leftEar.x - rightEar.x));
@@ -137,12 +142,38 @@ function drawPreview(result) {
     silhouetteContext.putImageData(silhouetteImageData, 0, 0);
     previewContext.drawImage(silhouetteCanvas, 0, 0, width, height);
   }
+  // Setup dots only until a baseline is saved; the silhouette above stays as score feedback.
+  if (baseline) return;
+  const landmarks = result?.landmarks?.[0];
+  const aligned = isAligned(landmarks); // dots turn green once the user sits centred
+  const drawPoint = (index, color) => {
+    const point = landmarks?.[index];
+    if (!point || point.visibility <= 0.2) return;
+    previewContext.beginPath();
+    previewContext.arc(point.x * width, point.y * height, 4, 0, Math.PI * 2);
+    previewContext.fillStyle = color;
+    previewContext.fill();
+    previewContext.strokeStyle = "#fff";
+    previewContext.lineWidth = 1.5;
+    previewContext.stroke();
+  };
+  [7, 8].forEach(index => drawPoint(index, aligned ? "#22c55e" : "#38bdf8"));
+  [11, 12].forEach(index => drawPoint(index, aligned ? "#22c55e" : "#fbbf24"));
+}
+
+// Setup check: nose centred, shoulders low in frame and a reasonable size (head-and-shoulders framing).
+function isAligned(landmarks) {
+  const nose = landmarks?.[0], left = landmarks?.[11], right = landmarks?.[12];
+  if (!nose || !left || !right || Math.min(nose.visibility, left.visibility, right.visibility) < 0.5) return false;
+  const shoulderY = (left.y + right.y) / 2, shoulderWidth = Math.abs(left.x - right.x);
+  return Math.abs(nose.x - 0.5) < 0.08 && shoulderY > 0.68 && shoulderY < 0.95 && shoulderWidth > 0.32 && shoulderWidth < 0.62;
 }
 
 function sendPreview(result, features) {
-  if (performance.now() - lastPreviewTime < 250 || !previewContext || previewInFlight) return;
+  if (performance.now() - lastPreviewTime < 100 || !previewContext || previewInFlight) return;
   lastPreviewTime = performance.now();
   drawPreview(result);
+  const guide = baseline ? null : isAligned(result?.landmarks?.[0]);
   previewInFlight = true;
   const generation = previewGeneration;
   previewCanvas.toBlob(blob => {
@@ -156,7 +187,7 @@ function sendPreview(result, features) {
       if (generation !== previewGeneration) return;
       previewInFlight = false;
       if (stream && typeof reader.result === "string") {
-        chrome.runtime.sendMessage({ type: "POSTUREFLOW_OFFSCREEN_PREVIEW", data: reader.result }).catch(() => {});
+        chrome.runtime.sendMessage({ type: "POSTUREFLOW_OFFSCREEN_PREVIEW", data: reader.result, guide }).catch(() => {});
       }
     };
     reader.onerror = () => {
@@ -180,8 +211,7 @@ async function createLandmarker() {
     runningMode: "VIDEO",
     numPoses: 1,
     minPoseDetectionConfidence: 0.55,
-    minTrackingConfidence: 0.55,
-    outputSegmentationMasks: true
+    minTrackingConfidence: 0.55
   });
   return landmarker;
 }
@@ -302,7 +332,7 @@ function processFrame() {
     } else if (baseline && ((features && !features.valid && !features.missing) || orientation?.suppressed)) {
       if (!unscorableSince) unscorableSince = performance.now();
       const invalidFor = performance.now() - unscorableSince;
-      if (invalidFor >= 400 && smoothedScore > 0) {
+      if (invalidFor >= (features.graceMs ?? 400) && smoothedScore > 0) {
         smoothedScore = 0;
         lastScorePublishTime = performance.now();
         chrome.runtime.sendMessage({
